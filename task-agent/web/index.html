@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Assistant</title>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.15.0/dist/livekit-client.umd.min.js"></script>
+<style>
+:root{--bg:#02060b;--line:#12303f;--text:#d9f1fb;--dim:#6f93a5;--ai:#2fd3ff}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font:15px/1.5 "Segoe UI",system-ui,sans-serif;display:flex}
+main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;min-width:0}
+canvas{width:min(70vh,92%);aspect-ratio:1}
+#status{margin-top:4px;color:var(--dim);font-size:16px;height:24px}
+.row{display:flex;gap:12px;margin-top:20px}
+button{font:inherit;border:1px solid var(--line);background:transparent;color:var(--text);padding:10px 22px;border-radius:999px;cursor:pointer}
+button:hover{border-color:var(--ai)}
+button:focus-visible{outline:2px solid var(--ai);outline-offset:2px}
+button:disabled{opacity:.5;cursor:not-allowed}
+#start{background:var(--ai);color:#021018;border-color:var(--ai);font-weight:600}
+#end{border-color:#6b2a35;color:#ff8b9b}
+[hidden]{display:none!important}
+@media(max-width:800px){canvas{width:min(46vh,80%)}}
+</style>
+</head>
+<body>
+<main>
+  <canvas id="orb" width="900" height="900"></canvas>
+  <div id="status">Ready to talk</div>
+  <div class="row">
+    <button id="start">Start talking</button>
+    <button id="mute" hidden>Mute</button>
+    <button id="end" hidden>End call</button>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('orb'), ctx = cv.getContext('2d'), W = cv.width, C = W / 2;
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// ---- orb ----
+const N = 900, pts = [];
+for (let i = 0; i < N; i++) {
+  const y = 1 - (i / (N - 1)) * 2, r = Math.sqrt(1 - y * y), a = i * 2.39996;
+  pts.push({ x: Math.cos(a) * r, y, z: Math.sin(a) * r, s: Math.random() * 6.28 });
+}
+let room = null, aiLvl = 0, meLvl = 0, ang = 0, t = 0;
+const lerp = (a, b, k) => a + (b - a) * k;
+
+function frame() {
+  t += 0.016;
+  let a = 0, m = 0;
+  if (room) {
+    m = room.localParticipant.audioLevel || 0;
+    room.remoteParticipants.forEach(p => a = Math.max(a, p.audioLevel || 0));
+  }
+  aiLvl = lerp(aiLvl, Math.min(a * 2.2, 1), 0.15);
+  meLvl = lerp(meLvl, Math.min(m * 2.2, 1), 0.15);
+  const lvl = Math.max(aiLvl, meLvl), me = meLvl > aiLvl;
+  const hue = me ? '143,123,255' : '47,211,255';
+  ang += reduce ? 0 : 0.004 + lvl * 0.02;
+  ctx.clearRect(0, 0, W, W);
+
+  const g = ctx.createRadialGradient(C, C, W * 0.2, C, C, W * 0.5);
+  g.addColorStop(0, `rgba(${hue},0)`); g.addColorStop(0.85, `rgba(${hue},${0.04 + lvl * 0.18})`); g.addColorStop(1, `rgba(${hue},0)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, W);
+
+  const R = W * 0.34 * (1 + lvl * 0.08), cos = Math.cos(ang), sin = Math.sin(ang);
+  for (const p of pts) {
+    const wob = 1 + Math.sin(t * 2 + p.s + p.y * 5) * (0.015 + lvl * 0.12);
+    const x = (p.x * cos - p.z * sin) * wob, z = (p.x * sin + p.z * cos) * wob, y = p.y * wob;
+    const depth = (z + 1) / 2, rim = 1 - Math.abs(z);
+    ctx.fillStyle = `rgba(${hue},${0.12 + depth * 0.5 + rim * 0.35})`;
+    const s = 1.2 + rim * 2.2 + lvl * 1.5;
+    ctx.fillRect(C + x * R - s / 2, C + y * R - s / 2, s, s);
+  }
+  ctx.lineWidth = 2;
+  for (let k = 0; k < 3; k++) {
+    ctx.strokeStyle = `rgba(${hue},${0.25 + lvl * 0.5})`;
+    ctx.beginPath();
+    for (let i = 0; i <= 120; i++) {
+      const th = (i / 120) * 6.2832;
+      const rr = R * (1 + Math.sin(th * (3 + k) + t * (1.2 + k * 0.5)) * (0.01 + lvl * 0.07));
+      const px = C + Math.cos(th) * rr, py = C + Math.sin(th) * rr;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+  }
+  requestAnimationFrame(frame);
+}
+frame();
+
+function setStatus(s) { $('status').textContent = s; }
+
+// ---- web call ----
+async function start() {
+  const LK = window.LivekitClient;
+  if (!LK) return setStatus('LiveKit script failed to load (check internet / CDN)');
+  const { Room, RoomEvent, Track } = LK;
+  $('start').disabled = true; setStatus('Connecting…');
+  try {
+    const { token, url } = await (await fetch('/token')).json();
+    room = new Room({ audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true } });
+
+    room.on(RoomEvent.TrackSubscribed, track => {
+      if (track.kind === Track.Kind.Audio) document.body.appendChild(track.attach());
+    });
+    room.on(RoomEvent.Disconnected, reset);
+
+    await room.connect(url, token);
+    await room.localParticipant.setMicrophoneEnabled(true);
+    $('start').hidden = true; $('mute').hidden = false; $('end').hidden = false;
+    setStatus('Connected. Say hello.');
+  } catch (e) {
+    console.error(e); setStatus('Could not connect. Is the server running?');
+    $('start').disabled = false; room = null;
+  }
+}
+function reset() {
+  room = null;
+  $('start').hidden = false; $('start').disabled = false;
+  $('mute').hidden = true; $('end').hidden = true; $('mute').textContent = 'Mute';
+  document.querySelectorAll('audio').forEach(a => a.remove());
+  setStatus('Call ended');
+}
+
+addEventListener('beforeunload', () => room && room.disconnect());
+$('start').onclick = start;
+$('end').onclick = () => room && room.disconnect();
+$('mute').onclick = async () => {
+  const on = room.localParticipant.isMicrophoneEnabled;
+  await room.localParticipant.setMicrophoneEnabled(!on);
+  $('mute').textContent = on ? 'Unmute' : 'Mute';
+};
+</script>
+</body>
+</html>
